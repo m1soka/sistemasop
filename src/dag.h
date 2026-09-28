@@ -1,48 +1,25 @@
 #ifndef DAG_H
 #define DAG_H
 
-#include <stddef.h>
 #include <sys/types.h>
 
-#define MAX_MSG 64
+typedef struct Dependency {
+    struct Node *task;
+    struct Dependency *next;
+} dep_t;
 
-typedef enum {
-    ST_PENDING,   /* esperando dependencias */
-    ST_READY,     /* listo para lanzar */
-    ST_RUNNING,   /* proceso vivo */
-    ST_DONE,      /* termino bien */
-    ST_FAILED,    /* fallo */
-    ST_ABORTED    /* abortada por fallo de ancestro o SIGINT */
-} state_t;
-
-typedef struct {
-    char   *id;
-    char   *name;
-    int     time_ms;
-    int     ndeps;
-    int     pending;
-    int    *children;
-    int     nchildren;
-    int    *parents;
-    int     nparents;
-    state_t state;
-    pid_t   pid;
-    char    inbox[MAX_MSG * 4];
+typedef struct Node {
+    char id[16];
+    char name[64];
+    int duration_ms;
+    int unresolved_dependencies;
+    dep_t *next_tasks;           
+    pid_t process_id;
 } node_t;
 
-typedef struct {
-    node_t *nodes;
-    int     n;
-} dag_t;
-
-/* Parser */
-int  dag_load(const char *path, dag_t *g);   /* 0 ok, -1 error */
-void dag_free(dag_t *g);
-
-/* Hijo */
-void child_run(const node_t *nd, int write_fd);
-
-/* Planificador */
-int  scheduler_run(dag_t *g, int K);
+// Declaraciones de las funciones principales a implementar en main.c / utils.c
+node_t* cargar_plan(const char *ruta_archivo, int *cantidad_nodos);
+void iniciar_planificador(node_t *grafo, int total_nodos, int limite_k);
+void limpiar_memoria(node_t *grafo, int total_nodos);
 
 #endif
