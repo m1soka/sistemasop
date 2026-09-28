@@ -1,0 +1,8 @@
+*.o
+planificador
+
+*.log
+*.dSYM/
+vgcore.*
+.DS_Store
+Thumbs.db
