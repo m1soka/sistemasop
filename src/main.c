@@ -5,162 +5,191 @@
 #include <sys/wait.h>
 #include <string.h>
 #include <signal.h>
+#include <errno.h>
+#include <time.h>
 #include "dag.h"
 
-// Variables globales para el manejador de señales
-volatile sig_atomic_t seremi_detectada = 0;
-node_t *grafo_global = NULL;
-int nodos_global = 0;
+#define TAM_MSG   100    /* mensaje acotado de una tarea al terminar */
+#define TAM_INBOX 512    /* insumos acumulados para una tarea dependiente */
 
-void manejador_seremi(int sig) {
-    (void)sig; // Evitar warning de variable sin uso
+static volatile sig_atomic_t seremi_detectada = 0;
+static int prob_fallo = 0;   /* % de fallo interno; se cambia con PROB_FALLO=N */
+
+static void manejador_seremi(int sig) {
+    (void)sig;
     seremi_detectada = 1;
-    printf("\n[!] SEREMI DETECTADA (Ctrl+C) - Abortando todas las actividades...\n");
+    const char msg[] = "\n[!] SEREMI DETECTADA (Ctrl+C) - Abortando todas las actividades...\n";
+    ssize_t r = write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    (void)r;
 }
 
-node_t* cargar_plan(const char *ruta_archivo, int *cantidad_nodos);
-void limpiar_memoria(node_t *grafo, int total_nodos);
+static void dormir_ms(int ms) {
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) == -1 && errno == EINTR) { }
+}
 
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        printf("Uso: %s <archivo.txt> <K>\n", argv[0]);
-        return 1;
+/*
+ * Planificador. Dos pipes por tarea:
+ *   p: hijo -> padre  (mensaje de termino)
+ *   q: padre -> hijo  (insumos de sus dependencias, escritos antes del fork)
+ * Sin busy-waiting: el padre solo espera en wait() (bloqueante).
+ */
+void iniciar_planificador(node_t *g, int n, int K) {
+    int *pipe_rd = malloc(n * sizeof(int));
+    char (*inbox)[TAM_INBOX] = calloc(n, TAM_INBOX);
+    if (!pipe_rd || !inbox) {
+        perror("malloc");
+        free(pipe_rd); free(inbox);
+        return;
+    }
+    int terminadas = 0, activos = 0;
+
+    while (terminadas < n && !seremi_detectada) {
+        int lanzo = 0;
+
+        for (int i = 0; i < n && activos < K; i++) {
+            if (g[i].unresolved_dependencies != 0 || g[i].process_id != 0) continue;
+
+            int p[2], q[2];
+            if (pipe(p) == -1) { perror("pipe"); break; }
+            if (pipe(q) == -1) { perror("pipe"); close(p[0]); close(p[1]); break; }
+
+            /* el padre deja los insumos en el pipe (cabe de sobra en el buffer) */
+            size_t len = strlen(inbox[i]);
+            if (len > 0) {
+                ssize_t w = write(q[1], inbox[i], len);
+                (void)w;
+            }
+            close(q[1]);
+
+            fflush(stdout);                  /* evita salida duplicada en el hijo */
+            pid_t pid = fork();
+
+            if (pid == 0) {
+                close(p[0]);
+                for (int j = 0; j < n; j++)  /* no heredar extremos de otros hijos */
+                    if (g[j].process_id > 0) close(pipe_rd[j]);
+                signal(SIGINT, SIG_DFL);
+                srand(getpid() ^ (unsigned)time(NULL));
+
+                char entrada[TAM_INBOX] = {0};
+                ssize_t r = read(q[0], entrada, sizeof(entrada) - 1);
+                close(q[0]);
+
+                printf("[HIJO] Tarea '%s' iniciada (Duracion: %d ms)\n",
+                       g[i].name, g[i].duration_ms);
+                if (r > 0)
+                    printf("[HIJO] Tarea '%s' recibio insumos: %s\n", g[i].name, entrada);
+                fflush(stdout);
+
+                dormir_ms(g[i].duration_ms);
+
+                if (rand() % 100 < prob_fallo) {
+                    printf("[HIJO] Tarea '%s' FALLO INTERNAMENTE.\n", g[i].name);
+                    fflush(stdout);
+                    close(p[1]);
+                    _exit(1);
+                }
+                char msg[TAM_MSG] = {0};
+                snprintf(msg, sizeof(msg), "La tarea '%s' termino exitosamente.", g[i].name);
+                ssize_t w = write(p[1], msg, sizeof(msg));
+                (void)w;
+                close(p[1]);
+                _exit(0);
+            } else if (pid > 0) {
+                close(p[1]);
+                close(q[0]);
+                pipe_rd[i] = p[0];
+                g[i].process_id = pid;
+                activos++;
+                lanzo = 1;
+            } else {
+                perror("fork");
+                close(p[0]); close(p[1]); close(q[0]);
+                break;
+            }
+        }
+
+        if (!lanzo && activos == 0) {
+            printf("[!] Flujo detenido. Las tareas restantes fueron abortadas por fallo en su dependencia.\n");
+            break;
+        }
+
+        if (activos == K || (!lanzo && activos > 0)) {
+            int status;
+            pid_t fin = wait(&status);
+            if (fin == -1) { if (errno == EINTR) continue; break; }
+            activos--; terminadas++;
+
+            for (int i = 0; i < n; i++) {
+                if (g[i].process_id != fin) continue;
+                g[i].process_id = -1;
+
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                    char buf[TAM_MSG] = {0};
+                    if (read(pipe_rd[i], buf, sizeof(buf) - 1) > 0)
+                        printf("[PADRE] Mensaje recibido por IPC: %s\n", buf);
+                    for (dep_t *d = g[i].next_tasks; d; d = d->next) {
+                        int idx = (int)(d->task - g);
+                        printf("[PADRE] Propagando insumo de '%s' a '%s'\n",
+                               g[i].name, d->task->name);
+                        size_t usado = strlen(inbox[idx]);
+                        if (usado + 1 < TAM_INBOX)
+                            snprintf(inbox[idx] + usado, TAM_INBOX - usado, "%s%s",
+                                     usado ? " | " : "", buf);
+                        if (d->task->unresolved_dependencies > 0)
+                            d->task->unresolved_dependencies--;
+                    }
+                } else {
+                    printf("[PADRE] La tarea '%s' reporto un error. Abortando rama dependiente.\n",
+                           g[i].name);
+                    for (dep_t *d = g[i].next_tasks; d; d = d->next)
+                        d->task->unresolved_dependencies = -1;
+                }
+                close(pipe_rd[i]);
+                break;
+            }
+        }
     }
 
+    if (seremi_detectada) {
+        for (int i = 0; i < n; i++)
+            if (g[i].process_id > 0) {
+                kill(g[i].process_id, SIGKILL);
+                close(pipe_rd[i]);
+            }
+        while (wait(NULL) > 0) { }
+    } else {
+        int no_ejecutadas = 0;
+        for (int i = 0; i < n; i++) if (g[i].process_id == 0) no_ejecutadas++;
+        if (no_ejecutadas) printf("[!] %d tareas no se ejecutaron.\n", no_ejecutadas);
+        printf("--- SIMULACION FINALIZADA ---\n");
+    }
+    free(pipe_rd);
+    free(inbox);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) { printf("Uso: %s <archivo.txt> <K>\n", argv[0]); return 1; }
     int K = atoi(argv[2]);
-    
-    // Configurar el manejador de la señal SIGINT (Ctrl+C)
+    if (K < 1) { printf("K debe ser >= 1\n"); return 1; }
+
+    const char *pf = getenv("PROB_FALLO");
+    if (pf) prob_fallo = atoi(pf);
+
     struct sigaction sa;
-    sa.sa_handler = manejador_seremi;
-    sa.sa_flags = 0;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = manejador_seremi;     /* sin SA_RESTART: wait() sale con EINTR */
     sigemptyset(&sa.sa_mask);
     sigaction(SIGINT, &sa, NULL);
 
-    grafo_global = cargar_plan(argv[1], &nodos_global);
-    if (!grafo_global) {
-        printf("Error cargando %s\n", argv[1]);
-        return 1;
-    }
-
-    int tareas_terminadas = 0;
-    int procesos_activos = 0;
-    
-    int fd[2];
-    if (pipe(fd) == -1) {
-        perror("Error al crear el pipe");
-        return 1;
-    }
+    srand((unsigned)time(NULL));
+    int n = 0;
+    node_t *g = cargar_plan(argv[1], &n);
+    if (!g) { printf("Error cargando %s\n", argv[1]); return 1; }
 
     printf("--- INICIANDO PLANIFICADOR (Límite K = %d) ---\n", K);
-
-    while (tareas_terminadas < nodos_global && !seremi_detectada) {
-        int lanzo_tarea = 0;
-
-        for (int i = 0; i < nodos_global && procesos_activos < K; i++) {
-            // unresolved_dependencies == 0 significa lista para ejecutar
-            if (grafo_global[i].unresolved_dependencies == 0 && grafo_global[i].process_id == 0) {
-                
-                pid_t pid = fork();
-
-                if (pid == 0) {
-                    close(fd[0]); 
-                    
-                    printf("[HIJO] Tarea '%s' iniciada (Duracion: %d ms)\n", 
-                           grafo_global[i].name, grafo_global[i].duration_ms);
-                    
-                    usleep(grafo_global[i].duration_ms * 1000);
-                    
-                    // Simulador de fallo: 10% de probabilidad de fallar para probar el requisito 4.1
-                    // En un caso real, la tarea fallaría por un error de ejecución.
-                    if (rand() % 100 < 10) {
-                        printf("[HIJO] Tarea '%s' FALLO INTERNAMENTE.\n", grafo_global[i].name);
-                        close(fd[1]);
-                        exit(1); // Código de error
-                    }
-                    
-                    char mensaje[100] = {0};
-                    snprintf(mensaje, sizeof(mensaje), "La tarea '%s' termino exitosamente.", grafo_global[i].name);
-                    write(fd[1], mensaje, sizeof(mensaje));
-                    
-                    close(fd[1]);
-                    exit(0); // Éxito
-                    
-                } else if (pid > 0) {
-                    grafo_global[i].process_id = pid;
-                    procesos_activos++;
-                    lanzo_tarea = 1;
-                }
-            }
-        }
-
-        if (procesos_activos == K || (!lanzo_tarea && procesos_activos > 0)) {
-            int status;
-            pid_t pid_terminado = wait(&status);
-            
-            // Si wait es interrumpido por Ctrl+C, salimos del ciclo
-            if (pid_terminado == -1) {
-                break;
-            }
-            
-            procesos_activos--;
-            tareas_terminadas++;
-
-            for (int i = 0; i < nodos_global; i++) {
-                if (grafo_global[i].process_id == pid_terminado) {
-                    grafo_global[i].process_id = -1; // Marcada como finalizada
-                    
-                    // REQUISITO 4.1: AISLAMIENTO DE ERRORES
-                    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-                        printf("[PADRE] La tarea '%s' reporto un error. Abortando rama dependiente.\n", grafo_global[i].name);
-                        // Marcamos las tareas dependientes con -1 para que nunca se ejecuten
-                        dep_t *actual = grafo_global[i].next_tasks;
-                        while (actual != NULL) {
-                            actual->task->unresolved_dependencies = -1; 
-                            actual = actual->next;
-                        }
-                    } else {
-                        // Flujo normal exitoso
-                        char buffer[100];
-                        read(fd[0], buffer, sizeof(buffer));
-                        printf("[PADRE] Mensaje recibido por IPC: %s\n", buffer);
-                        
-                        dep_t *actual = grafo_global[i].next_tasks;
-                        while (actual != NULL) {
-                            // Solo restamos dependencias si no fue cancelada (-1) previamente
-                            if (actual->task->unresolved_dependencies > 0) {
-                                actual->task->unresolved_dependencies--;
-                            }
-                            actual = actual->next;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        
-        // Si no lanzamos tareas y no hay procesos activos, significa que las restantes fueron canceladas por un fallo previo
-        if (!lanzo_tarea && procesos_activos == 0 && tareas_terminadas < nodos_global) {
-            printf("[!] Flujo de tareas detenido. Las tareas restantes fueron abortadas por un fallo en su dependencia.\n");
-            break;
-        }
-    }
-
-    // REQUISITO 4.2: LIMPIEZA TRAS CTRL+C
-    if (seremi_detectada) {
-        // Matar a todos los hijos activos
-        for (int i = 0; i < nodos_global; i++) {
-            if (grafo_global[i].process_id > 0) {
-                kill(grafo_global[i].process_id, SIGKILL);
-            }
-        }
-        // Esperar a que los hijos mueran para evitar procesos zombie
-        while (wait(NULL) > 0);
-    } else {
-        printf("--- SIMULACION FINALIZADA ---\n");
-    }
-    
-    close(fd[0]);
-    close(fd[1]);
-    limpiar_memoria(grafo_global, nodos_global);
+    iniciar_planificador(g, n, K);
+    limpiar_memoria(g, n);
     return 0;
 }

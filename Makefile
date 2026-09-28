@@ -1,19 +1,18 @@
-COMPILADOR = gcc
-BANDERAS = -Wall -Wextra -std=c17 -g
-LIBS = -lpthread
+CC      = gcc
+CFLAGS  = -Wall -Wextra -std=c17 -g
+LDLIBS  = -lpthread
+SRC     = src/main.c src/parser.c
+OBJ     = $(SRC:.c=.o)
 
+all: planificador
 
-FUENTES = $(wildcard src/*.c)
-OBJETOS = $(FUENTES:.c=.o)
-EJECUTABLE = planificador
-
-all: $(EJECUTABLE)
-
-$(EJECUTABLE): $(OBJETOS)
-	$(COMPILADOR) $(BANDERAS) -o $@ $^ $(LIBS)
+planificador: $(OBJ)
+	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
 src/%.o: src/%.c src/dag.h
-	$(COMPILADOR) $(BANDERAS) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJETOS) $(EJECUTABLE)
+	rm -f $(OBJ) planificador
+
+.PHONY: all clean

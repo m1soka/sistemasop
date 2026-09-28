@@ -1,6 +1,6 @@
 *.o
 planificador
-
+plan_grande.txt
 *.log
 *.dSYM/
 vgcore.*
