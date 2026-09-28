@@ -1,13 +1,19 @@
-CC     = gcc
-CFLAGS = -Wall -Wextra -std=c17 -D_POSIX_C_SOURCE=200809L -g
-SRC    = $(wildcard src/*.c)
-OBJ    = $(SRC:.c=.o)
+COMPILADOR = gcc
+BANDERAS = -Wall -Wextra -std=c17 -g
+LIBS = -lpthread
 
-planificador: $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJ) -lpthread
 
-%.o: %.c src/dag.h
-	$(CC) $(CFLAGS) -c $< -o $@
+FUENTES = $(wildcard src/*.c)
+OBJETOS = $(FUENTES:.c=.o)
+EJECUTABLE = planificador
+
+all: $(EJECUTABLE)
+
+$(EJECUTABLE): $(OBJETOS)
+	$(COMPILADOR) $(BANDERAS) -o $@ $^ $(LIBS)
+
+src/%.o: src/%.c src/dag.h
+	$(COMPILADOR) $(BANDERAS) -c $< -o $@
 
 clean:
-	rm -f $(OBJ) planificador
+	rm -f $(OBJETOS) $(EJECUTABLE)
