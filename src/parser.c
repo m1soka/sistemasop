@@ -1,25 +1,65 @@
-#include "dag.h"
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include "dag.h"
 
 node_t* cargar_plan(const char *ruta_archivo, int *cantidad_nodos) {
-    // Silenciar warning de variable sin usar mientras armas el parseo
-    (void)ruta_archivo; 
+    FILE *archivo = fopen(ruta_archivo, "r");
+    if (!archivo) return NULL;
 
-    // Aquí deberás implementar fopen() para leer el archivo de texto
-    // y asignar tiempos aleatorios (100 a 5000 ms) si falta la duración.
+    // 1. Contar las líneas del archivo para saber cuánta memoria pedir
+    int lineas = 0;
+    char buffer[256];
+    while (fgets(buffer, sizeof(buffer), archivo)) {
+        if (strlen(buffer) > 2) lineas++;
+    }
+    rewind(archivo); // Volver al inicio del archivo
+
+    // 2. Crear el arreglo dinámico para los nodos
+    node_t *grafo = calloc(lineas, sizeof(node_t));
+    *cantidad_nodos = lineas;
+
+    // 3. Extraer los datos línea por línea
+    int i = 0;
+    while (fgets(buffer, sizeof(buffer), archivo)) {
+        // strtok separa la línea de texto usando los dos puntos ':' como delimitador
+        char *id_str = strtok(buffer, ":");
+        char *nombre_str = strtok(NULL, ":");
+        char *tiempo_str = strtok(NULL, ":");
+        char *deps_str = strtok(NULL, "\n");
+
+        // Limpiar espacios y guardar en la estructura
+        sscanf(id_str, " %15[^ ]", grafo[i].id);
+        sscanf(nombre_str, " %63[^ ]", grafo[i].name);
+
+        // Evaluar si existe un tiempo definido
+        int tiempo = 0;
+        // Si sscanf logra leer un número, lo asigna. Si falla (ej. está vacío), genera el aleatorio.
+        if (tiempo_str != NULL && sscanf(tiempo_str, " %d", &tiempo) == 1) {
+            grafo[i].duration_ms = tiempo;
+        } else {
+            // Asigna aleatorio en un rango entre 100 y 5000 milisegundos
+            grafo[i].duration_ms = 100 + rand() % 4901; 
+        }
+
+        grafo[i].unresolved_dependencies = 0;
+        grafo[i].next_tasks = NULL;
+        grafo[i].process_id = 0;
+
+        i++;
+    }
     
-    *cantidad_nodos = 0;
-    return NULL; // Retornarás el arreglo dinámico (malloc) cuando lo implementes
+    fclose(archivo);
+    
+    // (Punto pendiente para ti: Faltaría hacer un segundo ciclo FOR aquí 
+    // para procesar 'deps_str' y armar las listas enlazadas de dependencias)
+
+    return grafo;
 }
 
 void limpiar_memoria(node_t *grafo, int total_nodos) {
-    // Silenciar warning de variable sin usar por ahora
-    (void)total_nodos; 
-
     if (grafo != NULL) {
-        // Aquí deberás iterar sobre cada nodo (de 0 a total_nodos)
-        // y liberar (free) la lista enlazada 'next_tasks' de cada uno
-        // antes de liberar el arreglo principal.
+        // Aquí deberás liberar los mallocs de las listas enlazadas más adelante
         free(grafo);
     }
 }
