@@ -4,7 +4,7 @@ Simulador y planificador de actividades para las Fiestas Patrias del señor Loyo
 (Tarea 1 - Sistemas Operativos). Cada actividad es un nodo de un DAG y se ejecuta como
 un **proceso hijo** (`fork`), respetando las dependencias y un límite de concurrencia K.
 
-**Integrantes:** _(completar nombres)_
+**Integrantes:** Misael Pizarro
 
 ## 1. Modo de uso (compilación y ejecución)
 
